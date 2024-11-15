@@ -1,0 +1,236 @@
+import streamlit as st
+import pandas as pd
+import pickle
+import re
+import csv
+import time
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from bs4 import BeautifulSoup
+from sklearn.ensemble import RandomForestClassifier
+from nltk.stem.porter import PorterStemmer
+from nltk.corpus import stopwords
+import plotly.graph_objects as go
+import nltk
+
+nltk.download('stopwords')
+STOPWORDS = set(stopwords.words('english'))
+
+def get_ratings_and_reviews(url):
+    options = Options()
+    options.headless = True  
+    driver = webdriver.Chrome(options=options)
+    driver.get(url)
+    page_source = driver.page_source
+    soup = BeautifulSoup(page_source, 'html.parser')
+    
+    span_tag = soup.find('span', class_="Wphh3N")
+    if span_tag:
+        text = span_tag.get_text()
+        ratings_match = re.search(r'(\d+,\d+|\d+) ratings', text)
+        reviews_match = re.search(r'(\d+,\d+|\d+) reviews', text)
+        ratings = ratings_match.group(1) if ratings_match else None
+        reviews = reviews_match.group(1) if reviews_match else None
+    else:
+        ratings, reviews = None, None
+    
+    name_tag = soup.find('span', class_="VU-ZEz")
+    name = name_tag.get_text() if name_tag else None
+    
+    price_tag = soup.find('div', class_="Nx9bqj CxhGGd")
+    price = price_tag.get_text(strip=True) if price_tag else None
+    
+    rating_tag = soup.find('div', class_="XQDdHH _1Quie7")
+    rating = rating_tag.get_text(strip=True) if rating_tag else None
+    
+    discount_tag = soup.find('div', class_="UkUFwK WW8zVX dB67CR")
+    discount = discount_tag.get_text(strip=True) if discount_tag else None
+    
+    driver.quit()
+    return ratings, reviews, name, price, rating, discount
+
+def scrape_reviews(url, num_reviews=10):
+    reviews_url = url.replace("/p/", "/product-reviews/")
+    options = Options()
+    options.headless = True
+    driver = webdriver.Chrome(options=options)
+    
+    reviews_data = []
+    page_number = 1
+    
+    while len(reviews_data) < num_reviews:
+        driver.get(f"{reviews_url}&page={page_number}")
+        page_source = driver.page_source
+        soup = BeautifulSoup(page_source, 'html.parser')
+        review_divs = soup.find_all('div', class_="_11pzQk")
+        
+        # Collect reviews from the current page
+        for review_div in review_divs:
+            review_text = review_div.get_text(strip=True)
+            reviews_data.append(review_text)
+            # Print review to terminal
+            print(f"Review: {review_text}")
+            
+            # Stop collecting if we've reached the desired number of reviews
+            if len(reviews_data) >= num_reviews:
+                break
+        
+        # If we've collected enough reviews, exit the loop
+        if len(reviews_data) >= num_reviews:
+            break
+        
+        page_number += 1
+        time.sleep(2)
+    
+    driver.quit()
+    
+    # Save reviews to CSV
+    with open('reviews.csv', 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Review'])
+        for review in reviews_data:
+            writer.writerow([review])
+    
+    print(f"Saved {len(reviews_data)} reviews to 'reviews.csv'.")
+    return reviews_data
+
+
+def preprocess_reviews(reviews):
+    stemmer = PorterStemmer()
+    processed_reviews = []
+    
+    for review in reviews:
+        review = re.sub('[^a-zA-Z]', ' ', review)
+        review = review.lower()
+        review = [stemmer.stem(word) for word in review.split() if word not in STOPWORDS]
+        processed_reviews.append(' '.join(review))
+    
+    return processed_reviews
+
+def load_model():
+    with open("countVectorizer.pkl", "rb") as cvf:
+        count_vectorizer = pickle.load(cvf)
+    with open("scaler.pkl", "rb") as sc:
+        scaler = pickle.load(sc)
+    with open("rn.pkl", "rb") as fr:
+        model_rf = pickle.load(fr)
+    return count_vectorizer, scaler, model_rf
+
+def sentiment_analysis(reviews):
+    count_vectorizer, scaler, model_rf = load_model()
+    x_new_count = count_vectorizer.transform(reviews)
+    x_new_scaled = scaler.transform(x_new_count.toarray())
+    return model_rf.predict(x_new_scaled)
+
+def compare_products(url1, url2):
+    with st.spinner("Fetching data..."):
+        try:
+            ratings1, reviews_count1, name1, price1, rating1, discount1 = get_ratings_and_reviews(url1)
+            ratings2, reviews_count2, name2, price2, rating2, discount2 = get_ratings_and_reviews(url2)
+            
+            reviews1 = scrape_reviews(url1, num_reviews=100)
+            reviews2 = scrape_reviews(url2, num_reviews=100)
+            
+            processed_reviews1 = preprocess_reviews(reviews1)
+            processed_reviews2 = preprocess_reviews(reviews2)
+            
+            sentiments1 = sentiment_analysis(processed_reviews1)
+            sentiments2 = sentiment_analysis(processed_reviews2)
+            
+            df_reviews1 = pd.DataFrame({"Review Body": reviews1, "Sentiment": sentiments1})
+            df_reviews2 = pd.DataFrame({"Review Body": reviews2, "Sentiment": sentiments2})
+            
+            sentiment_counts1 = df_reviews1['Sentiment'].value_counts()
+            sentiment_counts2 = df_reviews2['Sentiment'].value_counts()
+            
+            st.subheader("Product 1: {}".format(name1))
+            st.write("Price: {}".format(price1))
+            st.write("Rating: {}".format(rating1))
+            st.write("Discount: {}".format(discount1))
+            st.write("Total Ratings: {}".format(ratings1))
+            st.write("Total Reviews: {}".format(reviews_count1))
+            
+            fig_sentiment1 = go.Figure(go.Bar(
+                y=sentiment_counts1.index.map({1: 'Positive', 0: 'Negative'}),
+                x=sentiment_counts1.values,
+                text=sentiment_counts1.values,
+                textposition='auto',
+                marker_color=['green', 'red'],
+                orientation='h'
+            ))
+            fig_sentiment1.update_layout(xaxis_title='Number of Reviews', yaxis_title='Sentiment')
+            st.plotly_chart(fig_sentiment1, use_container_width=True)
+            
+            st.subheader("Product 2: {}".format(name2))
+            st.write("Price: {}".format(price2))
+            st.write("Rating: {}".format(rating2))
+            st.write("Discount: {}".format(discount2))
+            st.write("Total Ratings: {}".format(ratings2))
+            st.write("Total Reviews: {}".format(reviews_count2))
+            
+            fig_sentiment2 = go.Figure(go.Bar(
+                y=sentiment_counts2.index.map({1: 'Positive', 0: 'Negative'}),
+                x=sentiment_counts2.values,
+                text=sentiment_counts2.values,
+                textposition='auto',
+                marker_color=['green', 'red'],
+                orientation='h'
+            ))
+            fig_sentiment2.update_layout(xaxis_title='Number of Reviews', yaxis_title='Sentiment')
+            st.plotly_chart(fig_sentiment2, use_container_width=True)
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.subheader("Positive Reviews - Product 1")
+                positive_reviews1 = df_reviews1[df_reviews1['Sentiment'] == 1]['Review Body']
+                for review in positive_reviews1:
+                    st.success(review)
+            
+            with col2:
+                st.subheader("Positive Reviews - Product 2")
+                positive_reviews2 = df_reviews2[df_reviews2['Sentiment'] == 1]['Review Body']
+                for review in positive_reviews2:
+                    st.success(review)
+            
+            col3, col4 = st.columns([1, 1])
+            
+            with col3:
+                st.subheader("Negative Reviews - Product 1")
+                negative_reviews1 = df_reviews1[df_reviews1['Sentiment'] == 0]['Review Body']
+                for review in negative_reviews1:
+                    st.warning(review)
+            
+            with col4:
+                st.subheader("Negative Reviews - Product 2")
+                negative_reviews2 = df_reviews2[df_reviews2['Sentiment'] == 0]['Review Body']
+                for review in negative_reviews2:
+                    st.warning(review)
+            
+            # Compare the overall sentiment and provide a recommendation
+            pos_count1 = sentiment_counts1[1] if 1 in sentiment_counts1 else 0
+            neg_count1 = sentiment_counts1[0] if 0 in sentiment_counts1 else 0
+            pos_count2 = sentiment_counts2[1] if 1 in sentiment_counts2 else 0
+            neg_count2 = sentiment_counts2[0] if 0 in sentiment_counts2 else 0
+            
+            if pos_count1 > pos_count2 and neg_count1 < neg_count2:
+                st.success("Based on the sentiment analysis, we recommend Product 1.")
+            elif pos_count2 > pos_count1 and neg_count2 < neg_count1:
+                st.success("Based on the sentiment analysis, we recommend Product 2.")
+            else:
+                st.warning("The sentiment analysis is inconclusive. We cannot provide a clear recommendation.")
+        
+        except Exception as e:
+            st.error("Error fetching data.")
+            st.write(e)
+
+if __name__ == "__main__":
+    st.set_page_config(page_title="Flipkart Product Comparison", page_icon=":bar_chart:")
+    st.title("Compare Flipkart Products 🛒")
+    
+    st.subheader("Enter Product URLs")
+    url1 = st.text_input("Product 1 URL", placeholder="Enter Flipkart product URL")
+    url2 = st.text_input("Product 2 URL", placeholder="Enter Flipkart product URL")
+    
+    if st.button("Compare"):
+        compare_products(url1, url2)
