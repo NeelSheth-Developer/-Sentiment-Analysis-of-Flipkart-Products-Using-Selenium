@@ -1,0 +1,7 @@
+streamlit==1.36.0
+pandas==2.2.2
+beautifulsoup4==4.12.3
+selenium==4.23.1
+scikit-learn==1.5.2
+nltk==3.9.1
+plotly==5.22.0
